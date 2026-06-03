@@ -250,8 +250,8 @@ export class SessionEventHandler {
     const toolCall = streamingUI.getToolComponent(parentToolCallId);
     const swarmProgress = this.agentSwarmProgress.get(parentToolCallId);
     if (swarmProgress !== undefined) {
-      if (event.type === 'assistant.delta') {
-        swarmProgress.appendAssistantDelta({
+      if (event.type === 'assistant.delta' || event.type === 'thinking.delta') {
+        swarmProgress.appendModelDelta({
           agentId: subagentId,
           delta: event.delta,
         });
@@ -261,9 +261,17 @@ export class SessionEventHandler {
           toolCallId: event.toolCallId,
         });
       } else if (event.type === 'turn.ended') {
-        swarmProgress.markCompleted(subagentId);
+        if (event.reason === 'cancelled') {
+          swarmProgress.markCancelled(subagentId);
+        } else {
+          swarmProgress.markCompleted(subagentId);
+        }
       } else if (event.type === 'subagent.failed') {
-        swarmProgress.markFailed(event.subagentId);
+        if (isUserCancelledSubagentError(event.error)) {
+          swarmProgress.markCancelled(event.subagentId);
+        } else {
+          swarmProgress.markFailed(event.subagentId);
+        }
       }
       this.host.setAgentSwarmProgress(swarmProgress);
       return true;
@@ -949,7 +957,11 @@ export class SessionEventHandler {
     }
     const swarmProgress = this.agentSwarmProgress.get(event.parentToolCallId);
     if (swarmProgress !== undefined) {
-      swarmProgress.markFailed(event.subagentId);
+      if (isUserCancelledSubagentError(event.error)) {
+        swarmProgress.markCancelled(event.subagentId);
+      } else {
+        swarmProgress.markFailed(event.subagentId);
+      }
       this.host.setAgentSwarmProgress(swarmProgress);
       streamingUI.removeToolComponentIfInactive(event.parentToolCallId);
       return;
@@ -1134,4 +1146,14 @@ export class SessionEventHandler {
     state.footer.setBackgroundCounts({ bashTasks, agentTasks });
     state.ui.requestRender();
   }
+}
+
+function isUserCancelledSubagentError(error: string): boolean {
+  const normalized = error.trim();
+  return (
+    normalized === 'Aborted by the user' ||
+    normalized === 'The user manually interrupted this subagent batch.' ||
+    normalized.startsWith('The user manually interrupted this subagent ') ||
+    normalized.includes('This was a deliberate user action, not a system error')
+  );
 }

@@ -287,7 +287,8 @@ export class Session {
     const mainAgent = this.requireMainAgent();
 
     try {
-      const handle = await mainAgent.subagentHost!.spawn('coder', {
+      const handle = await mainAgent.subagentHost!.spawn({
+        profileName: 'coder',
         parentToolCallId: 'generate-agents-md',
         prompt: DEFAULT_INIT_PROMPT,
         description: 'Initialize AGENTS.md',

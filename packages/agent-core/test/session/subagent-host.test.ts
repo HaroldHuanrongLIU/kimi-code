@@ -12,7 +12,11 @@ import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
 import { Session } from '../../src/session';
 import { collectGitContext } from '../../src/session/git-context';
-import { SessionSubagentHost } from '../../src/session/subagent-host';
+import {
+  SessionSubagentHost,
+  type QueuedSubagentTask,
+  type SubagentHandle,
+} from '../../src/session/subagent-host';
 import { abortError, userCancellationReason } from '../../src/utils/abort';
 import { testAgent, type AgentTestContext } from '../agent/harness/agent';
 import { createFakeKaos } from '../tools/fixtures/fake-kaos';
@@ -26,6 +30,8 @@ vi.mock('../../src/session/git-context', () => ({
 }));
 
 const signal = new AbortController().signal;
+const rateLimit429Message =
+  "429 We're receiving too many requests at the moment. Please wait a moment and try again.";
 const tempDirs: string[] = [];
 
 afterEach(async () => {
@@ -35,6 +41,154 @@ afterEach(async () => {
 });
 
 describe('SessionSubagentHost', () => {
+  it('runQueued ramps launches in batches of ten up to thirty', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new SessionSubagentHost({} as Session, 'main');
+      const completions: Array<ReturnType<typeof deferred<{ result: string }>>> = [];
+      const spawn = vi.spyOn(host, 'spawn').mockImplementation((options) => {
+        const profileName = typeof options === 'string' ? options : options.profileName;
+        const completion = deferred<{ result: string }>();
+        completions.push(completion);
+        return Promise.resolve({
+          agentId: `agent-${String(completions.length)}`,
+          profileName,
+          resumed: false,
+          completion: completion.promise,
+        } satisfies SubagentHandle);
+      });
+
+      const running = host.runQueued(
+        Array.from({ length: 30 }, (_, index) => queuedTask(index + 1)),
+        { signal },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawn).toHaveBeenCalledTimes(10);
+
+      await vi.advanceTimersByTimeAsync(499);
+      expect(spawn).toHaveBeenCalledTimes(10);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(spawn).toHaveBeenCalledTimes(20);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(spawn).toHaveBeenCalledTimes(30);
+
+      completions.forEach((completion, index) => {
+        completion.resolve({ result: `result ${String(index + 1)}` });
+      });
+      const results = await running;
+
+      expect(results).toHaveLength(30);
+      expect(results.every((result) => result.status === 'completed')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runQueued queues 429 and launches one queued subagent 500ms after a slot opens', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new SessionSubagentHost({} as Session, 'main');
+      const completions: Array<
+        ReturnType<typeof deferred<{ result: string }>> & { readonly prompt: string }
+      > = [];
+      let firstItemRateLimited = false;
+      const spawn = vi
+        .spyOn(host, 'spawn')
+        .mockImplementation((options, legacyOptions?: { readonly prompt: string }) => {
+          const profileName = typeof options === 'string' ? options : options.profileName;
+          const prompt = typeof options === 'string' ? legacyOptions?.prompt : options.prompt;
+          if (prompt === undefined) {
+            throw new Error('mocked subagent prompt is required');
+          }
+          if (prompt === 'Review item-1' && !firstItemRateLimited) {
+            firstItemRateLimited = true;
+            return Promise.resolve({
+              agentId: 'agent-rate-limited',
+              profileName,
+              resumed: false,
+              completion: Promise.resolve().then(() => {
+                throw new Error(rateLimit429Message);
+              }),
+            } satisfies SubagentHandle);
+          }
+          const completion = {
+            ...deferred<{ result: string }>(),
+            prompt,
+          };
+          completions.push(completion);
+          return Promise.resolve({
+            agentId: `agent-${String(completions.length)}`,
+            profileName,
+            resumed: false,
+            completion: completion.promise,
+          } satisfies SubagentHandle);
+        });
+
+      const running = host.runQueued(
+        Array.from({ length: 11 }, (_, index) => queuedTask(index + 1)),
+        { signal },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawn).toHaveBeenCalledTimes(10);
+
+      completions[0]!.resolve({ result: 'opened one slot' });
+      await vi.advanceTimersByTimeAsync(499);
+      expect(spawn).toHaveBeenCalledTimes(10);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(spawn).toHaveBeenCalledTimes(11);
+      expect(spawn).toHaveBeenLastCalledWith({
+        data: 1,
+        profileName: 'coder',
+        parentToolCallId: 'call_swarm',
+        prompt: 'Review item-1',
+        description: 'Review #1',
+        runInBackground: false,
+        signal,
+      });
+
+      for (const completion of [...completions]) {
+        completion.resolve({ result: `${completion.prompt} done` });
+      }
+      await vi.advanceTimersByTimeAsync(500);
+      expect(spawn).toHaveBeenCalledTimes(12);
+      completions.at(-1)!.resolve({ result: 'Review item-11 done' });
+
+      const results = await running;
+
+      expect(results).toHaveLength(11);
+      expect(results.every((result) => result.status === 'completed')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runQueued reports an error when every initial launch hits 429', async () => {
+    const host = new SessionSubagentHost({} as Session, 'main');
+    vi.spyOn(host, 'spawn').mockImplementation((options) => {
+      const profileName = typeof options === 'string' ? options : options.profileName;
+      return Promise.resolve({
+        agentId: 'agent-rate-limited',
+        profileName,
+        resumed: false,
+        completion: Promise.resolve().then(() => {
+          throw new Error(rateLimit429Message);
+        }),
+      } satisfies SubagentHandle);
+    });
+
+    await expect(
+      host.runQueued(
+        Array.from({ length: 3 }, (_, index) => queuedTask(index + 1)),
+        { signal },
+      ),
+    ).rejects.toThrow('Could not start any subagents');
+  });
+
   it('fires subagent lifecycle hooks around the child turn', async () => {
     const child = testAgent();
     const calls: Array<{ readonly event: string; readonly childLlmCallCount: number }> = [];
@@ -1184,6 +1338,27 @@ function stat(kind: 'dir' | 'file') {
     stAtime: 0,
     stMtime: 0,
     stCtime: 0,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function queuedTask(index: number): QueuedSubagentTask<number> {
+  return {
+    data: index,
+    profileName: 'coder',
+    parentToolCallId: 'call_swarm',
+    prompt: `Review item-${String(index)}`,
+    description: `Review #${String(index)}`,
+    runInBackground: false,
   };
 }
 

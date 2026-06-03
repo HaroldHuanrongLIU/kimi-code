@@ -1,20 +1,17 @@
 import { z } from 'zod';
 
 import type { BuiltinTool } from '../../../agent/tool';
-import type { SessionSubagentHost, SubagentHandle } from '../../../session/subagent-host';
-import {
-  createDeadlineAbortSignal,
-  isUserCancellation,
-  type DeadlineAbortSignal,
-} from '../../../utils/abort';
-import { isAbortError } from '../../../loop/errors';
+import type {
+  QueuedSubagentRunResult,
+  QueuedSubagentTask,
+  SessionSubagentHost,
+} from '../../../session/subagent-host';
 import { ToolAccesses } from '../../../loop/tool-access';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
 import { matchesGlobRuleSubject } from '../../support/rule-match';
 import AGENT_SWARM_DESCRIPTION from './agent-swarm.md';
 
-const MAX_SWARM_AGENTS = 50;
 const DEFAULT_SUBAGENT_TYPE = 'coder';
 const PROMPT_TEMPLATE_PLACEHOLDER = '{{item}}';
 
@@ -32,6 +29,15 @@ export const AgentSwarmToolInputSchema = z
       .max(3600)
       .optional()
       .describe('Timeout in seconds for each subagent.'),
+    total_timeout: z
+      .number()
+      .int()
+      .min(30)
+      .max(3600)
+      .optional()
+      .describe(
+        'Timeout in seconds for the whole swarm, including queued and running subagents.',
+      ),
     subagent_type: z
       .string()
       .trim()
@@ -53,7 +59,6 @@ export const AgentSwarmToolInputSchema = z
     items: z
       .array(z.string().trim().min(1))
       .min(2)
-      .max(MAX_SWARM_AGENTS)
       .describe(
         `Values used to fill ${PROMPT_TEMPLATE_PLACEHOLDER}. Each item launches one subagent.`,
       ),
@@ -125,68 +130,23 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     signal: AbortSignal,
     toolCallId: string,
   ): Promise<string> {
-    let foregroundDeadline: DeadlineAbortSignal | undefined;
-    try {
-      foregroundDeadline =
-        args.timeout !== undefined
-          ? createDeadlineAbortSignal(signal, args.timeout * 1000)
-          : undefined;
-      const runSignal = foregroundDeadline?.signal ?? signal;
-      const results = await Promise.all(
-        specs.map((spec) =>
-          this.runOne(
-            args,
-            spec,
-            runSignal,
-            toolCallId,
-            () => foregroundDeadline?.timedOut() === true,
-          ),
-        ),
-      );
-      return renderSwarmResults(args, results);
-    } finally {
-      foregroundDeadline?.clear();
-    }
-  }
-
-  private async runOne(
-    args: AgentSwarmToolInput,
-    spec: AgentSwarmSpec,
-    signal: AbortSignal,
-    toolCallId: string,
-    timedOut: () => boolean,
-  ): Promise<SwarmRunResult> {
     const profileName = args.subagent_type ?? DEFAULT_SUBAGENT_TYPE;
-    const description = childDescription(args.description, spec.index, profileName);
-    let handle: SubagentHandle | undefined;
-    try {
-      signal.throwIfAborted();
-      handle = await this.subagentHost.spawn(profileName, {
+    const tasks = specs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
+      return {
+        data: spec,
+        profileName,
         parentToolCallId: toolCallId,
         prompt: spec.prompt,
-        description,
+        description: childDescription(args.description, spec.index, profileName),
         runInBackground: false,
-        signal,
-      });
-      const completion = await handle.completion;
-      return {
-        spec,
-        agentId: handle.agentId,
-        profileName: handle.profileName,
-        description,
-        status: 'completed',
-        result: completion.result,
       };
-    } catch (error) {
-      return {
-        spec,
-        agentId: handle?.agentId,
-        profileName: handle?.profileName ?? profileName,
-        description,
-        status: 'failed',
-        error: formatSubagentError(error, signal, timedOut, args.timeout),
-      };
-    }
+    });
+    const results = await this.subagentHost.runQueued(tasks, {
+      signal,
+      timeoutMs: args.timeout === undefined ? undefined : args.timeout * 1000,
+      totalTimeoutMs: args.total_timeout === undefined ? undefined : args.total_timeout * 1000,
+    });
+    return renderSwarmResults(args, results.map(toSwarmRunResult));
   }
 }
 
@@ -258,22 +218,18 @@ function swarmResultHasFailures(result: string): boolean {
   return result.startsWith('agent_swarm: failed\n');
 }
 
-function formatSubagentError(
-  error: unknown,
-  signal: AbortSignal,
-  timedOut: () => boolean,
-  timeout: number | undefined,
-): string {
-  if (timedOut() && timeout !== undefined) {
-    return `AgentSwarm timed out after ${String(timeout)}s.`;
-  }
-  if (isUserCancellation(signal.reason)) {
-    return 'The user manually interrupted this subagent swarm.';
-  }
-  if (isAbortError(error)) {
-    return 'The subagent was stopped before it finished.';
-  }
-  return errorMessage(error);
+function toSwarmRunResult(
+  result: QueuedSubagentRunResult<AgentSwarmSpec>,
+): SwarmRunResult {
+  return {
+    spec: result.task.data,
+    agentId: result.agentId,
+    profileName: result.profileName,
+    description: result.task.description,
+    status: result.status,
+    result: result.result,
+    error: result.error,
+  };
 }
 
 function errorMessage(error: unknown): string {

@@ -60,10 +60,11 @@ function context<Input>(args: Input, toolCallId = 'call_1') {
   return { turnId: '0', toolCallId, args, signal };
 }
 
-function mockSubagentHost<T extends Pick<SessionSubagentHost, 'spawn'> & Partial<SessionSubagentHost>>(
+function mockSubagentHost<T extends Partial<SessionSubagentHost>>(
   host: T,
 ): T & SessionSubagentHost {
-  return { resume: vi.fn(), ...host } as unknown as T & SessionSubagentHost;
+  return { spawn: vi.fn(), resume: vi.fn(), runQueued: vi.fn(), ...host } as unknown as T &
+    SessionSubagentHost;
 }
 
 function processWithOutput(stdout: string, exitCode = 0): KaosProcess {
@@ -291,14 +292,36 @@ describe('current builtin collaboration tools', () => {
 
   it('AgentSwarm applies one subagent_type across templated subagents', async () => {
     const host = mockSubagentHost({
-      spawn: vi.fn().mockImplementation((profileName: string) =>
-        Promise.resolve({
-          agentId: `agent-${profileName}`,
-          profileName,
-          resumed: false,
-          completion: Promise.resolve({ result: `${profileName} result` }),
-        }),
-      ),
+      runQueued: vi.fn().mockResolvedValue([
+        {
+          task: {
+            data: { index: 1, item: 'src/a.ts', prompt: 'Review src/a.ts' },
+            profileName: 'explore',
+            parentToolCallId: 'call_swarm',
+            prompt: 'Review src/a.ts',
+            description: 'Review files #1 (explore)',
+            runInBackground: false,
+          },
+          agentId: 'agent-explore-1',
+          profileName: 'explore',
+          status: 'completed',
+          result: 'explore result a',
+        },
+        {
+          task: {
+            data: { index: 2, item: 'src/b.ts', prompt: 'Review src/b.ts' },
+            profileName: 'explore',
+            parentToolCallId: 'call_swarm',
+            prompt: 'Review src/b.ts',
+            description: 'Review files #2 (explore)',
+            runInBackground: false,
+          },
+          agentId: 'agent-explore-2',
+          profileName: 'explore',
+          status: 'completed',
+          result: 'explore result b',
+        },
+      ]),
     });
     const tool = new AgentSwarmTool(host);
     const input = {
@@ -309,28 +332,45 @@ describe('current builtin collaboration tools', () => {
     };
 
     expect(AgentSwarmToolInputSchema.safeParse(input).success).toBe(true);
+    expect(
+      AgentSwarmToolInputSchema.safeParse({
+        ...input,
+        items: Array.from({ length: 31 }, (_, index) => `src/${String(index + 1)}.ts`),
+      }).success,
+    ).toBe(true);
     expect(tool.parameters).toMatchObject({
       type: 'object',
-      properties: { subagent_type: { type: 'string' } },
+      properties: { subagent_type: { type: 'string' }, total_timeout: { type: 'integer' } },
     });
 
     const result = await executeTool(tool, context(input, 'call_swarm'));
 
-    expect(host.spawn).toHaveBeenCalledTimes(2);
-    expect(host.spawn).toHaveBeenNthCalledWith(1, 'explore', {
-      parentToolCallId: 'call_swarm',
-      prompt: 'Review src/a.ts',
-      description: 'Review files #1 (explore)',
-      runInBackground: false,
-      signal,
-    });
-    expect(host.spawn).toHaveBeenNthCalledWith(2, 'explore', {
-      parentToolCallId: 'call_swarm',
-      prompt: 'Review src/b.ts',
-      description: 'Review files #2 (explore)',
-      runInBackground: false,
-      signal,
-    });
+    expect(host.runQueued).toHaveBeenCalledTimes(1);
+    expect(host.runQueued).toHaveBeenCalledWith(
+      [
+        {
+          data: { index: 1, item: 'src/a.ts', prompt: 'Review src/a.ts' },
+          profileName: 'explore',
+          parentToolCallId: 'call_swarm',
+          prompt: 'Review src/a.ts',
+          description: 'Review files #1 (explore)',
+          runInBackground: false,
+        },
+        {
+          data: { index: 2, item: 'src/b.ts', prompt: 'Review src/b.ts' },
+          profileName: 'explore',
+          parentToolCallId: 'call_swarm',
+          prompt: 'Review src/b.ts',
+          description: 'Review files #2 (explore)',
+          runInBackground: false,
+        },
+      ],
+      {
+        signal,
+        timeoutMs: undefined,
+        totalTimeoutMs: undefined,
+      },
+    );
     expect(result.output).toContain('subagent_type: explore');
     expect(result.output).toContain('explore result');
   });
