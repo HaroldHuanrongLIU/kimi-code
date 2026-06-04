@@ -58,6 +58,7 @@ import { HelpPanelComponent } from './components/dialogs/help-panel';
 import { QuestionDialogComponent } from './components/dialogs/question-dialog';
 import { SessionPickerComponent } from './components/dialogs/session-picker';
 import { AuthFlowController } from './controllers/auth-flow';
+import { BtwPanelController } from './controllers/btw-panel';
 import { EditorKeyboardController } from './controllers/editor-keyboard';
 import { SessionEventHandler } from './controllers/session-event-handler';
 import * as slashCommands from './commands/dispatch';
@@ -86,7 +87,9 @@ import {
   LLM_NOT_SET_MESSAGE,
   MAIN_AGENT_ID,
   NO_ACTIVE_SESSION_MESSAGE,
+  PRODUCT_NAME,
 } from './constant/kimi-tui';
+import { MAX_TERMINAL_TITLE_LENGTH } from './constant/terminal';
 import { combineStartupNotice, isOAuthLoginRequiredError } from './utils/startup';
 import { adaptPanelResponse } from './reverse-rpc/approval/adapter';
 import { ApprovalController } from './reverse-rpc/approval/controller';
@@ -116,8 +119,7 @@ import { formatErrorMessage } from './utils/event-payload';
 import { ImageAttachmentStore, type ImageAttachment } from './utils/image-attachment-store';
 import { extractMediaAttachments } from './utils/image-placeholder';
 import { hasPatchChanges } from './utils/object-patch';
-import { openUrl } from './utils/open-url';
-import { setProcessTitle } from './utils/proctitle';
+import { openUrl } from '#/utils/open-url';
 import { sessionRowsForPicker } from './utils/session-picker-rows';
 import { installTerminalFocusTracking } from './utils/terminal-focus';
 import { notifyTerminalOnce } from './utils/terminal-notification';
@@ -218,6 +220,7 @@ export class KimiTUI {
   private lastHistoryContent: string | undefined;
   readonly streamingUI: StreamingUIController;
   readonly authFlow: AuthFlowController;
+  readonly btwPanelController: BtwPanelController;
   readonly sessionEventHandler: SessionEventHandler;
   readonly sessionReplay: SessionReplayRenderer;
   readonly tasksBrowserController: TasksBrowserController;
@@ -289,6 +292,7 @@ export class KimiTUI {
     );
     this.streamingUI = new StreamingUIController(this);
     this.authFlow = new AuthFlowController(this);
+    this.btwPanelController = new BtwPanelController(this);
     this.sessionEventHandler = new SessionEventHandler(this);
     this.sessionReplay = new SessionReplayRenderer(this);
     this.tasksBrowserController = new TasksBrowserController(this);
@@ -461,7 +465,7 @@ export class KimiTUI {
     }
     void this.fetchSessions();
     if (this.session !== undefined) {
-      this.refreshSessionTitle();
+      this.updateTerminalTitle();
     }
     void this.refreshSkillCommands(this.session);
   }
@@ -651,6 +655,7 @@ export class KimiTUI {
     ui.addChild(this.state.activityContainer);
     ui.addChild(this.state.todoPanelContainer);
     ui.addChild(this.state.queueContainer);
+    ui.addChild(this.state.btwPanelContainer);
     ui.addChild(this.state.editorContainer);
     // Footer is mounted later (mountFooter), not here.
   }
@@ -685,6 +690,7 @@ export class KimiTUI {
   }
 
   sendNormalUserInput(text: string): void {
+    if (this.btwPanelController.sendUserInput(text)) return;
     if (this.state.appState.model.trim().length === 0) {
       this.showError(LLM_NOT_SET_MESSAGE);
       return;
@@ -1124,8 +1130,10 @@ export class KimiTUI {
     }
   }
 
-  refreshSessionTitle(): void {
-    setProcessTitle(this.state.appState.sessionTitle, this.state.appState.sessionId);
+  updateTerminalTitle(): void {
+    const trimmed = this.state.appState.sessionTitle?.trim() ?? '';
+    const label = trimmed.length > 0 ? trimmed.slice(0, MAX_TERMINAL_TITLE_LENGTH) : PRODUCT_NAME;
+    this.state.terminal.setTitle(label);
   }
 
   resetSessionRuntime(): void {
@@ -1137,6 +1145,7 @@ export class KimiTUI {
     this.streamingUI.resetToolUi();
     this.sessionEventHandler.resetRuntimeState();
     this.tasksBrowserController.close();
+    this.btwPanelController.clear();
     this.state.footer.setBackgroundCounts({ bashTasks: 0, agentTasks: 0 });
     this.streamingUI.setTodoList([]);
     this.streamingUI.setTurnId(undefined);
@@ -1177,7 +1186,7 @@ export class KimiTUI {
     this.resetSessionRuntime();
     await this.setSession(session);
     await this.syncRuntimeState(session);
-    this.refreshSessionTitle();
+    this.updateTerminalTitle();
     try {
       await this.refreshSkillCommands(this.session);
     } catch {
@@ -1192,6 +1201,34 @@ export class KimiTUI {
     } finally {
       this.sessionEventHandler.startSubscription();
     }
+    const resumeState = session.getResumeState();
+    if (resumeState?.warning !== undefined) {
+      this.showStatus(`Warning: ${resumeState.warning}`, this.state.theme.colors.warning);
+    }
+    this.showStatus(statusMessage);
+  }
+
+  async reloadCurrentSessionView(session: Session, statusMessage: string): Promise<void> {
+    this.sessionEventUnsubscribe?.();
+    this.sessionEventUnsubscribe = undefined;
+    this.clearReverseRpcPanels();
+    session.setApprovalHandler(undefined);
+    session.setQuestionHandler(undefined);
+    this.approvalController.cancelAll('reloading session');
+    this.questionController.cancelAll('reloading session');
+
+    this.resetSessionRuntime();
+    this.session = session;
+    this.harness.setTelemetryContext({ sessionId: session.id });
+    this.registerSessionHandlers(session);
+    await this.syncRuntimeState(session);
+    this.updateTerminalTitle();
+    try {
+      await this.refreshSkillCommands(session);
+    } catch {
+      /* keep the reloaded session usable even if dynamic skills fail */
+    }
+    this.sessionEventHandler.startSubscription();
     const resumeState = session.getResumeState();
     if (resumeState?.warning !== undefined) {
       this.showStatus(`Warning: ${resumeState.warning}`, this.state.theme.colors.warning);
@@ -1390,6 +1427,7 @@ export class KimiTUI {
     this.streamingUI.resetToolUi();
     this.sessionEventHandler.stopAllMcpServerStatusSpinners();
     this.state.transcriptContainer.clear();
+    this.btwPanelController.clear();
     this.clearTerminalInlineImages();
     this.state.todoPanel.clear();
     this.state.todoPanelContainer.clear();
@@ -1588,10 +1626,9 @@ export class KimiTUI {
 
   updateEditorBorderHighlight(text?: string): void {
     const trimmed = (text ?? this.state.editor.getText()).trimStart();
-    const colorToken =
-      this.state.appState.planMode || trimmed.startsWith('/')
-        ? this.state.theme.colors.primary
-        : this.state.theme.colors.border;
+    const highlighted = this.state.appState.planMode || trimmed.startsWith('/');
+    const colorToken = highlighted ? this.state.theme.colors.primary : this.state.theme.colors.border;
+    this.state.editor.borderHighlighted = highlighted;
     this.state.editor.borderColor = (s: string) => chalk.hex(colorToken)(s);
     this.state.ui.requestRender();
   }

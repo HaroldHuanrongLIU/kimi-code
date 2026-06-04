@@ -63,11 +63,11 @@ import {
   type McpServerStatusSnapshot,
   selectMcpStartupStatusRows,
 } from '../utils/mcp-server-status';
-import { openUrl } from '../utils/open-url';
-import { setProcessTitle } from '../utils/proctitle';
+import { openUrl } from '#/utils/open-url';
 import { errorReportHintLine } from '../constant/feedback';
 import { formatStepDebugTiming } from '#/utils/usage/debug-timing';
 import { nextTranscriptId } from '../utils/transcript-id';
+import type { BtwPanelController } from './btw-panel';
 import type { StreamingUIController } from './streaming-ui';
 import type { TasksBrowserController } from './tasks-browser';
 import type {
@@ -97,8 +97,10 @@ export interface SessionEventHost {
   showNotice(title: string, detail?: string): void;
   setAgentSwarmProgress(component: AgentSwarmProgressComponent | null): void;
   appendTranscriptEntry(entry: TranscriptEntry): void;
+  updateTerminalTitle(): void;
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
   shiftQueuedMessage(): QueuedMessage | undefined;
+  readonly btwPanelController: BtwPanelController;
   readonly tasksBrowserController: TasksBrowserController;
 }
 
@@ -245,8 +247,11 @@ export class SessionEventHandler {
     if (subagentId === MAIN_AGENT_ID) return false;
 
     const { streamingUI } = this.host;
+    if (this.host.btwPanelController.routeEvent(event)) return true;
+
     const info = this.subagentInfo.get(subagentId);
-    if (info === undefined || info.parentToolCallId.length === 0) return true;
+    if (info === undefined) return true;
+    if (info.parentToolCallId.length === 0) return true;
     const { parentToolCallId } = info;
     const sourceName = info.name;
     const toolCall = streamingUI.getToolComponent(parentToolCallId);
@@ -332,6 +337,7 @@ export class SessionEventHandler {
       case 'cron.fired':
       case 'error':
       case 'warning':
+      case 'goal.updated':
       case 'session.meta.updated':
       case 'skill.activated':
       case 'goal.updated':
@@ -708,7 +714,7 @@ export class SessionEventHandler {
     const title = event.title ?? stringValue(event.patch?.['title']);
     if (title !== undefined) {
       this.host.setAppState({ sessionTitle: title });
-      setProcessTitle(title, this.host.state.appState.sessionId);
+      this.host.updateTerminalTitle();
     }
   }
 

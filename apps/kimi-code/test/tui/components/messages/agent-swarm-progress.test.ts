@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   AgentSwarmProgressComponent,
@@ -27,7 +27,7 @@ describe('AgentSwarmProgressComponent', () => {
     expect(output).not.toContain('01');
   });
 
-  it('renders spawned subagents as text-only spawning rows', () => {
+  it('renders spawned subagents as queued progress rows', () => {
     const component = new AgentSwarmProgressComponent({
       description: 'Review changed files',
       colors: darkColors,
@@ -38,11 +38,10 @@ describe('AgentSwarmProgressComponent', () => {
 
     const output = strip(component.render(100).join('\n'));
 
-    expect(output).toContain('agents=2');
-    expect(output).toContain('running=2');
-    expect(output).toContain('01 Spawning...');
-    expect(output).toContain('02 Spawning...');
-    expect(output).not.toContain('01 [');
+    expect(output).toContain('001 [');
+    expect(output).toContain('002 [');
+    expect(output).toContain('Queued');
+    expect(output).not.toContain('agents=2');
   });
 
   it('advances one step when a subagent tool call starts and marks terminal states', () => {
@@ -56,19 +55,18 @@ describe('AgentSwarmProgressComponent', () => {
     component.recordToolCall({ agentId: 'agent-1', toolCallId: 'call-read' });
 
     let output = strip(component.render(100).join('\n'));
-    expect(output).toContain('01 [');
-    expect(output).toContain('Working');
-    expect(output).toContain('02 Spawning...');
+    expect(output).toContain('001 [');
+    expect(output).toContain('Running');
+    expect(output).toContain('002 [');
+    expect(output).toContain('Queued');
 
     component.markCompleted('agent-1');
     component.markFailed('agent-2');
 
     output = strip(component.render(100).join('\n'));
-    expect(output).toContain('complete=1');
-    expect(output).toContain('failed=1');
-    expect(output).toContain('01 [');
+    expect(output).toContain('001 [');
     expect(output).toContain('Completed');
-    expect(output).toContain('02 [');
+    expect(output).toContain('002 [');
     expect(output).toContain('Failed');
   });
 
@@ -87,44 +85,30 @@ describe('AgentSwarmProgressComponent', () => {
     });
 
     const output = strip(component.render(44).join('\n'));
-    expect(output).toContain('01 [');
+    expect(output).toContain('001 [');
     expect(output).toContain('Reviewing');
     expect(output).toContain('…');
     expect(output).not.toContain('Working');
   });
 
-  it('switches spawned rows to animated spawning once AgentSwarm input is complete', () => {
-    vi.useFakeTimers();
-    const requestRender = vi.fn();
+  it('keeps spawned rows queued when AgentSwarm input completes', () => {
     const component = new AgentSwarmProgressComponent({
       description: 'Review changed files',
       colors: darkColors,
-      requestRender,
     });
 
-    try {
-      component.registerSubagent({
-        agentId: 'agent-1',
-        description: 'Review changed files #1 (coder)',
-      });
-      let output = strip(component.render(100).join('\n'));
-      expect(output).toContain('01 Spawning...');
-      expect(output).not.toContain('01 [');
+    component.registerSubagent({
+      agentId: 'agent-1',
+      description: 'Review changed files #1 (coder)',
+    });
+    let output = strip(component.render(100).join('\n'));
+    expect(output).toContain('001 [');
+    expect(output).toContain('Queued');
 
-      component.markInputComplete();
-      output = strip(component.render(100).join('\n'));
-      expect(output).toContain('01 [');
-      expect(output).toContain('Spawning');
-
-      const before = output;
-      vi.advanceTimersByTime(80);
-      const after = strip(component.render(100).join('\n'));
-      expect(requestRender).toHaveBeenCalled();
-      expect(after).not.toBe(before);
-    } finally {
-      component.dispose();
-      vi.useRealTimers();
-    }
+    component.markInputComplete();
+    output = strip(component.render(100).join('\n'));
+    expect(output).toContain('001 [');
+    expect(output).toContain('Queued');
   });
 
   it('creates pending rows from streamed args items', () => {
@@ -140,9 +124,8 @@ describe('AgentSwarmProgressComponent', () => {
     const output = strip(component.render(100).join('\n'));
 
     expect(output).toContain('Agent swarm: Review changed files');
-    expect(output).toContain('agents=2');
-    expect(output).toContain('01 src/a.ts');
-    expect(output).toContain('02 src/b.ts');
+    expect(output).toContain('001 src/a.ts');
+    expect(output).toContain('002 src/b.ts');
   });
 
   it('counts partial items before each string is complete', () => {
@@ -168,9 +151,8 @@ describe('AgentSwarmProgressComponent', () => {
     });
     const output = strip(component.render(100).join('\n'));
 
-    expect(output).toContain('agents=2');
-    expect(output).toContain('01 src/a.ts');
-    expect(output).toContain('02 src/b');
+    expect(output).toContain('001 src/a.ts');
+    expect(output).toContain('002 src/b');
   });
 
   it('adds subagent rows incrementally as spawn events arrive', () => {
@@ -181,14 +163,15 @@ describe('AgentSwarmProgressComponent', () => {
 
     component.registerSubagent({ agentId: 'agent-1', description: 'Review changed files #1 (coder)' });
     let output = strip(component.render(100).join('\n'));
-    expect(output).toContain('agents=1');
-    expect(output).toContain('01 Spawning...');
-    expect(output).not.toContain('02');
+    expect(output).toContain('001 [');
+    expect(output).toContain('Queued');
+    expect(output).not.toContain('002');
 
     component.registerSubagent({ agentId: 'agent-2', description: 'Review changed files #2 (coder)' });
     output = strip(component.render(100).join('\n'));
-    expect(output).toContain('agents=2');
-    expect(output).toContain('02 Spawning...');
+    expect(output).toContain('001 [');
+    expect(output).toContain('002 [');
+    expect(output).toContain('Queued');
   });
 
   it('extracts description and item list from AgentSwarm args', () => {

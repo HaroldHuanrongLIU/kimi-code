@@ -310,7 +310,15 @@ describe('CLI options parsing', () => {
       const commandNames: string[] = program.commands
         .filter((command) => !command.name().startsWith('__'))
         .map((command) => command.name());
-      expect(commandNames).toEqual(['export', 'provider', 'migrate', 'swarm-demo', 'upgrade']);
+      expect(commandNames).toEqual([
+        'export',
+        'provider',
+        'acp',
+        'login',
+        'migrate',
+        'swarm-demo',
+        'upgrade',
+      ]);
     });
   });
 

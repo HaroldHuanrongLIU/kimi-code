@@ -15,12 +15,14 @@ import {
 } from './resolve';
 import type { BuiltinSlashCommandName } from './registry';
 import type { AuthFlowController } from '../controllers/auth-flow';
+import type { BtwPanelController } from '../controllers/btw-panel';
 import type { StreamingUIController } from '../controllers/streaming-ui';
 import type { TasksBrowserController } from '../controllers/tasks-browser';
 import type { AppState, LoginProgressSpinnerHandle, QueuedMessage } from '../types';
 import type { TUIState } from '../tui-state';
 
 import { handleLoginCommand, handleLogoutCommand } from './auth';
+import { handleBtwCommand } from './btw';
 import { tryHandleDanceCommand } from '../easter-eggs/dance';
 import {
   handleAutoCommand,
@@ -38,6 +40,7 @@ import { handleGoalCommand } from './goal';
 import { handleProviderCommand } from './provider';
 import { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
 import { handlePluginsCommand } from './plugins';
+import { handleReloadCommand, handleReloadTuiCommand } from './reload';
 import { handleSwarmCommand } from './swarm';
 import {
   handleExportDebugZipCommand,
@@ -56,6 +59,7 @@ export {
   handleLoginCommand,
   handleLogoutCommand,
 } from './auth';
+export { handleBtwCommand } from './btw';
 export {
   handleAutoCommand,
   handleCompactCommand,
@@ -76,6 +80,7 @@ export {
   showUsage,
 } from './info';
 export { handlePluginsCommand } from './plugins';
+export { handleReloadCommand, handleReloadTuiCommand } from './reload';
 export { handleGoalCommand } from './goal';
 export {
   handleExportDebugZipCommand,
@@ -110,6 +115,7 @@ export interface SlashCommandHost {
   // Session
   requireSession(): Session;
   switchToSession(session: Session, message: string): Promise<void>;
+  reloadCurrentSessionView(session: Session, message: string): Promise<void>;
   beginSessionRequest(): void;
   failSessionRequest(message: string): void;
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
@@ -135,6 +141,7 @@ export interface SlashCommandHost {
 
   // Controller refs
   readonly streamingUI: StreamingUIController;
+  readonly btwPanelController: BtwPanelController;
   readonly tasksBrowserController: TasksBrowserController;
   readonly authFlow: AuthFlowController;
 }
@@ -234,6 +241,12 @@ async function handleBuiltInSlashCommand(
     case 'plugins':
       void handlePluginsCommand(host, args);
       return;
+    case 'reload':
+      await handleReloadCommand(host);
+      return;
+    case 'reload-tui':
+      await handleReloadTuiCommand(host);
+      return;
     case 'editor':
       await handleEditorCommand(host, args);
       return;
@@ -260,6 +273,9 @@ async function handleBuiltInSlashCommand(
       return;
     case 'feedback':
       await handleFeedbackCommand(host);
+      return;
+    case 'btw':
+      await handleBtwCommand(host, args);
       return;
     case 'title':
       await handleTitleCommand(host, args);
