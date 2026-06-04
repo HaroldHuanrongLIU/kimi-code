@@ -33,19 +33,6 @@ export function isUserCancellation(value: unknown): value is UserCancellationErr
 }
 
 export function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      reject(abortError());
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
-}
-
-export function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(abortReason(signal));
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => {
@@ -73,7 +60,14 @@ export function linkAbortSignal(source: AbortSignal, target: AbortController): (
 }
 
 function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : abortError();
+  if (signal.reason instanceof Error && !isDefaultAbortReason(signal.reason)) {
+    return signal.reason;
+  }
+  return abortError();
+}
+
+function isDefaultAbortReason(reason: Error): boolean {
+  return reason.name === 'AbortError' && reason.message === 'This operation was aborted';
 }
 
 export interface DeadlineAbortSignal {

@@ -21,8 +21,8 @@ import type { Session } from './index';
 import {
   SubagentLaunchQueue,
   formatTimeoutMs,
-  isRateLimit429Error,
   totalTimeoutMessage,
+  type QueuedSubagentAttemptOptions,
   type QueuedSubagentAttemptOutcome,
   type QueuedSubagentRunOptions,
   type QueuedSubagentRunResult,
@@ -46,6 +46,10 @@ const SUMMARY_CONTINUATION_ATTEMPTS = 1;
 const HOOK_TEXT_PREVIEW_LENGTH = 500;
 const SUBAGENT_MAX_TOKENS_ERROR =
   'Subagent turn failed before completing its final summary: reason=max_tokens';
+const RATE_LIMIT_429_MESSAGE =
+  "429 We're receiving too many requests at the moment. Please wait a moment and try again.";
+const RATE_LIMIT_429_BODY =
+  "We're receiving too many requests at the moment. Please wait a moment and try again.";
 
 type RunSubagentOptions = {
   readonly parentToolCallId: string;
@@ -88,7 +92,9 @@ export class SessionSubagentHost {
     private readonly ownerAgentId: string,
     readonly backgroundTaskTimeoutMs?: number | undefined,
   ) {
-    this.launchQueue = new SubagentLaunchQueue(this);
+    this.launchQueue = new SubagentLaunchQueue((task, options) =>
+      this.runQueuedTaskAttempt(task, options),
+    );
   }
 
   async spawn(options: SpawnSubagentOptions): Promise<SubagentHandle> {
@@ -193,7 +199,7 @@ export class SessionSubagentHost {
     tasks: readonly QueuedSubagentTask<T>[],
     options: QueuedSubagentRunOptions,
   ): Promise<Array<QueuedSubagentRunResult<T>>> {
-    return await this.launchQueue.run(tasks, options);
+    return this.launchQueue.run(tasks, options);
   }
 
   cancelAll(reason: unknown = userCancellationReason()): void {
@@ -216,11 +222,9 @@ export class SessionSubagentHost {
     return this.session.agents.get(agentId)?.config.profileName;
   }
 
-  async runQueuedTaskAttempt<T>(
+  private async runQueuedTaskAttempt<T>(
     task: QueuedSubagentTask<T>,
-    options: QueuedSubagentRunOptions,
-    totalTimedOut: () => boolean,
-    markReady: () => void,
+    options: QueuedSubagentAttemptOptions,
   ): Promise<QueuedSubagentAttemptOutcome<T>> {
     const subagentDeadline =
       options.timeoutMs === undefined
@@ -233,7 +237,7 @@ export class SessionSubagentHost {
       handle = await this.spawn({
         ...task,
         signal: runSignal,
-        onFirstOutput: markReady,
+        onFirstOutput: options.markReady,
       });
       const completion = await handle.completion;
       return {
@@ -253,7 +257,7 @@ export class SessionSubagentHost {
       let message: string;
       if (subagentDeadline?.timedOut() === true && options.timeoutMs !== undefined) {
         message = `Subagent timed out after ${formatTimeoutMs(options.timeoutMs)}.`;
-      } else if (totalTimedOut() && options.totalTimeoutMs !== undefined) {
+      } else if (options.totalTimedOut() && options.totalTimeoutMs !== undefined) {
         message = totalTimeoutMessage(options.totalTimeoutMs);
       } else if (isUserCancellation(runSignal.reason)) {
         message = 'The user manually interrupted this subagent batch.';
@@ -499,4 +503,15 @@ function isFirstOutputEvent(event: AgentEvent): boolean {
     default:
       return false;
   }
+}
+
+function isRateLimit429Error(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes(RATE_LIMIT_429_MESSAGE)) return true;
+  if (!message.includes(RATE_LIMIT_429_BODY)) return false;
+  if (message.includes('429') || message.includes('provider.rate_limit')) return true;
+  if (typeof error !== 'object' || error === null) return false;
+  const statusCode = (error as { readonly statusCode?: unknown }).statusCode;
+  const status = (error as { readonly status?: unknown }).status;
+  return statusCode === 429 || status === 429;
 }
